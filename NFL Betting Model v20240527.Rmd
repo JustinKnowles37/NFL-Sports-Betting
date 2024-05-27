@@ -1,0 +1,251 @@
+---
+title: "NFL Betting 2024"
+output: html_notebook
+---
+
+The goal of this project is to use historical NFL data to be able to predict future outcomes for sports betting.
+It is currently a work in progress and is incomplete. 
+So far, only initial data processing has been completed, and no models have been created yet.
+
+Data from:
+https://www.kaggle.com/datasets/tobycrabtree/nfl-scores-and-betting-data/
+
+The original source files included some messy starter code.
+I have used that starter code as inspiration, but have cleaned it up and made it more efficient by using dplyr.
+
+Additional data may be needed to achieve meaningful results.
+The original dataset may be lacking predictive power.
+
+# Initialization
+```{r}
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+setwd("C:/Users/jknow/OneDrive/Documents/Sports Betting/NFL/2024")
+```
+
+# Load Data
+```{r}
+nfl <- read.csv("1 Data/spreadspoke_scores.csv", stringsAsFactors=F)
+teams <- read.csv("1 Data/nfl_teams.csv",stringsAsFactors= F)
+stadiums <- read.csv("1 Data/nfl_stadiums.csv",stringsAsFactors=F)
+```
+
+# Format Raw Data
+```{r}
+nfl$schedule_date <- as.Date(nfl$schedule_date, "%m/%d/%Y")
+nfl$team_favorite_id <- as.factor(nfl$team_favorite_id)
+```
+
+# Add Game Info Columns
+```{r}
+# Add Home Team Columns
+nfl <- nfl %>%
+  left_join(teams,by=c('team_home'='team_name')) %>%
+  mutate(team_home_name_short = as.factor(team_name_short),
+         team_home_id = as.factor(team_id),
+         team_home_id_pfr = as.factor(team_id_pfr),
+         team_home_conference_current = as.factor(team_conference), # current conference for all rows
+         team_home_division_current = as.factor(team_division), # current division for all rows
+         team_home_conference_pre2002 = as.factor(team_conference_pre2002), # pre2002 conference for all rows
+         team_home_division_pre2002 = as.factor(team_division_pre2002), # pre2002 division for all rows
+         team_home_division = as.factor(ifelse(schedule_season < 2002,
+                                               team_home_division_pre2002,
+                                               team_home_division_current)),
+         team_home_conference = as.factor(ifelse(schedule_season < 2002,
+                                                 team_home_conference_pre2002,
+                                                 team_home_conference_current))) %>%
+  select(-team_name_short,-team_id,-team_id_pfr,-team_conference,-team_division,-team_conference_pre2002,-team_division_pre2002)
+
+# Add Away Team Columns
+nfl <- nfl %>%
+  left_join(teams,by=c('team_away'='team_name')) %>%
+  mutate(team_away_name_short = as.factor(team_name_short),
+         team_away_id = as.factor(team_id),
+         team_away_id_pfr = as.factor(team_id_pfr),
+         team_away_conference_current = as.factor(team_conference), # current conference for all rows
+         team_away_division_current = as.factor(team_division), # current division for all rows
+         team_away_conference_pre2002 = as.factor(team_conference_pre2002), # pre2002 conference for all rows
+         team_away_division_pre2002 = as.factor(team_division_pre2002), # pre2002 division for all rows
+         team_away_division = as.factor(ifelse(schedule_season < 2002,
+                                               team_away_division_pre2002,
+                                               team_away_division_current)),
+         team_away_conference = as.factor(ifelse(schedule_season < 2002,
+                                                 team_away_conference_pre2002,
+                                                 team_away_conference_current))) %>%
+  select(-team_name_short,-team_id,-team_id_pfr,-team_conference,-team_division,-team_conference_pre2002,-team_division_pre2002)
+
+# Get Game Unique ID
+nfl <- nfl %>%
+  mutate(game_id = gsub("-","",paste(as.Date(schedule_date,format='%m/%d/%Y'),team_away_id,team_home_id,sep="_")))
+
+# Get Stadium Info
+nfl <- nfl %>%
+  left_join(stadiums,by=c('stadium'='stadium_name')) %>%
+  mutate(stadium_type = as.factor(stadium_type))
+
+# Get Schedule Info
+season_length <- nfl %>%
+  filter(schedule_playoff==FALSE) %>%
+  group_by(schedule_season) %>%
+  summarise(season_length = max(as.integer(schedule_week)))
+
+# Create dummy variables for first week of season and last week of season [consider week after bye week, or short week ie, sunday>thursday game]
+nfl <- nfl %>%
+  left_join(season_length,by='schedule_season') %>%
+  mutate(schedule_week_first = (schedule_week==1),
+         schedule_week_last = (schedule_week==season_length))
+
+# Add Day of Week Info
+nfl <- nfl %>%
+  mutate(schedule_day = wday(schedule_date, label=TRUE),
+         schedule_month = month(nfl$schedule_date, label=TRUE),
+         schedule_sunday = schedule_day%in%c("Sun"))
+ 
+# Add Matchup Info
+nfl <- nfl %>%
+  mutate(conference_matchup = (team_home_conference==team_away_conference),
+         division_matchup = (team_home_division==team_away_division))
+```
+
+# Add Betting Info
+```{r}
+# Add Spread and Over/Under Columns
+nfl <- nfl %>%
+  mutate(team_home_favorite = (as.character(team_favorite_id)==as.character(team_home_id)), # Doesn't exactly work because some rows have team_favorite_id %in% c("","PICK","LV"), which are not in team_home_id or team_away_id. Need to improve all lines that depend on team_home_favorite
+         team_home_spread = ifelse(team_home_favorite,
+                                   spread_favorite,
+                                   -nfl$spread_favorite),
+         team_away_spread = -team_home_spread,
+         spread_type = as.factor(ifelse(team_home_spread==0,
+                                        "Pick",
+                                        ifelse(team_home_spread>0,
+                                               "Home Underdog",
+                                               "Home Favorite"))),
+         spread_outlier = as.factor(ifelse(abs(spread_favorite)>14,
+                                           "2TD+",
+                                           ifelse(abs(spread_favorite)>10,
+                                                  "1TD1FG+",
+                                                  ifelse(abs(spread_favorite)>7,
+                                                         "1TD+",
+                                                         "No Outlier")))),
+         over_under_outlier = as.factor(ifelse(over_under_line<33,
+                                               "Under 2sd",
+                                               ifelse(over_under_line<37,
+                                                      "Under 1sd",
+                                                      ifelse(over_under_line>50,
+                                                             "Over 2sd",
+                                                             ifelse(over_under_line>46,
+                                                                    "Overer 1sd",
+                                                                    "No Outlier"))))))
+
+# Add More Game Columns
+nfl <- nfl %>%
+  mutate(tie = (score_home==score_away),
+         team_winner = as.factor(ifelse(score_home>score_away,
+                                        as.character(team_home_id),
+                                        ifelse(score_home<score_away,
+                                               as.character(team_away_id),
+                                               "Tie"))),
+         team_loser = as.factor(ifelse(score_home<score_away,
+                                       as.character(team_home_id),
+                                       ifelse(score_home>score_away,
+                                              as.character(team_away_id),
+                                              "Tie"))),
+         team_home_result = as.factor(ifelse(score_home>score_away,
+                                             "Win",
+                                             ifelse(score_home<score_away,
+                                                    "Loss",
+                                                    "Tie"))),
+         team_away_result = as.factor(ifelse(score_home<score_away,
+                                             "Win",
+                                             ifelse(score_home>score_away,
+                                                    "Loss",
+                                                    "Tie"))),
+         score_total = score_home+score_away,
+         team_home_win_count = ifelse(team_home_result=="Win",
+                                      1,
+                                      ifelse(team_home_result=="Loss",
+                                             0,
+                                             0.5)),
+         team_away_win_count = ifelse(team_away_result=="Win",
+                                      1,
+                                      ifelse(team_away_result=="Loss",
+                                             0,
+                                             0.5)))
+
+# Add Betting Result Columns
+nfl <- nfl %>%
+  mutate(over_under_result = as.factor(ifelse(score_total>over_under_line,
+                                              "Over",
+                                              ifelse(score_total<over_under_line,
+                                                     "Under",
+                                                     "Push"))),
+         over_under_result_count = ifelse(over_under_result=="Over",
+                                          1,
+                                          ifelse(over_under_result=="Under",
+                                                 0,
+                                                 0.5)),
+         spread_home_result = score_away-score_home,
+         spread_away_result = -spread_home_result,
+         score_favorite = ifelse(as.character(team_favorite_id)==as.character(team_home_id),
+                                 score_home,
+                                 ifelse(as.character(team_favorite_id)==as.character(team_away_id),
+                                        score_away,
+                                        0)),
+         score_underdog = ifelse(as.character(team_favorite_id)==as.character(team_home_id),
+                                 score_away,
+                                 ifelse(as.character(team_favorite_id)==as.character(team_away_id),
+                                        score_home,
+                                        0)),
+         spread_favorite_result = ifelse(as.character(team_favorite_id)==as.character(team_home_id),
+                                         spread_home_result,
+                                         ifelse(as.character(team_favorite_id)==as.character(team_away_id),
+                                                spread_away_result,
+                                                0)),
+         spread_favorite_cover_result = as.factor(ifelse((score_favorite+spread_favorite)>score_underdog,
+                                                         "Cover",
+                                                         ifelse((score_favorite+spread_favorite)<score_underdog,
+                                                                "Did Not Cover",
+                                                                "Push"))),
+         spread_favorite_cover_count = ifelse(as.character(spread_favorite_cover_result)=="Cover",
+                                              1,
+                                              ifelse(as.character(spread_favorite_cover_result)=="Did Not Cover",
+                                                     0,
+                                                     0.5)),
+         spread_underdog_result = -spread_favorite_result,
+         spread_underdog_cover_result = as.factor(ifelse((score_favorite+spread_favorite)>score_underdog,
+                                                         "Did Not Cover",
+                                                         ifelse((score_favorite+spread_favorite)<score_underdog,
+                                                                "Cover",
+                                                                "Push"))),
+         spread_underdog_cover_count = ifelse(as.character(spread_underdog_cover_result)=="Cover",
+                                              1,
+                                              ifelse(as.character(spread_underdog_cover_result)=="Did Not Cover",
+                                                     0,
+                                                     0.5)),
+         spread_home_cover_result = as.factor(ifelse(team_home_favorite,
+                                                     as.character(spread_favorite_cover_result),
+                                                     as.character(spread_underdog_cover_result))),
+         spread_away_cover_result = as.factor(ifelse(!team_home_favorite,
+                                                     as.character(spread_favorite_cover_result),
+                                                     as.character(spread_underdog_cover_result))),
+         spread_home_cover_count = ifelse(spread_home_cover_result=="Cover",
+                                          1,
+                                          ifelse(spread_home_cover_result=="Did Not Cover",
+                                                 0,
+                                                 0.5)),
+         spread_away_cover_count = ifelse(spread_away_cover_result=="Cover",
+                                          1,
+                                          ifelse(spread_away_cover_result=="Did Not Cover",
+                                                 0,
+                                                 0.5)))
+```
+
+```{r}
+# subset into games played versus future games
+nflForecast <- subset(nfl,nfl$schedule_date > as.Date('2018-12-31')) # data for forecast games
+nfl <- subset(nfl,nfl$schedule_date < as.Date('2018-12-31')) # data for played games
+```
+
